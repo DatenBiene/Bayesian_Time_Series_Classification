@@ -10,7 +10,8 @@ class bayesian_hmm:
         self.prior_transitions = prior_transitions
         self.n_iter_gibbs = n_iter_gibbs
         self.class_label = class_label
-    
+        self.cache_estimator = {}
+            
     def normal_pdf(self, x, mu, sigma):
         return np.exp(-(x - mu)**2/(2*sigma))/(np.sqrt(2*np.pi)*sigma)
     
@@ -30,24 +31,56 @@ class bayesian_hmm:
         row_sums = mat.sum(axis=1)
         return mat / row_sums[:, np.newaxis]
     
-    def get_backward(self, y, prior_params, prior_transitions):
+    def get_forward(self, y, prior_params, prior_transitions, initial_distribution=None):
+        """ Only to get the normalizing constant for the backward step """
+        c = []
+        n_states = prior_transitions.shape[0]
+        T = len(y)
+        alpha = np.zeros((T, n_states))
+        o = self.emission_proba_viterbi(y, prior_transitions, prior_params)
+        
+        if initial_distribution is None:
+            initial_distribution = np.array([1./n_states] * n_states)
+        alpha[0, :] = initial_distribution * o[:, 0]
+        c0 = np.sum(alpha[0, :])
+        alpha[0, :] = alpha[0, :] / c0
+        c.append(c0)
+       
+        for t in range(1, T):
+            for j in range(n_states):
+                alpha[t, j] = alpha[t - 1].dot(prior_transitions[:, j]) * o[j, t]
+            ct = np.sum(alpha[t, :])
+            alpha[t, :] = alpha[t, :] / ct
+            c.append(ct)
+        
+        self.forward = alpha
+        self.c = c
+        return None
+    
+
+
+    def get_backward(self, y, prior_params, prior_transitions, c):
         """ comments """
         n_states = prior_transitions.shape[0]
         T = len(y)
         backward = np.zeros((T, n_states))
         o = self.emission_proba_viterbi(y, prior_transitions, prior_params)
         # setting beta(T) = 1
-        backward[T - 1] = np.ones((n_states))
+        backward[T - 1] = np.ones((n_states)) /c[0]
         # Loop in backward way from T-1 to
         for t in range(T - 2, -1, -1):
             for j in range(n_states):
                 backward[t, j] = (backward[t + 1] * o[:, t + 1]).dot(prior_transitions[j, :])
-
+            ##### ---- experimental ------###### 
+            #scaling to avoid underflow
+            backward[t, :] = backward[t, :] / c[t]
         return backward
     
     def simulate_path(self, y, prior_params, prior_transitions):
         """ comments """
-        backward = self.get_backward(y, prior_params, prior_transitions)
+        self.get_forward(y, prior_params, prior_transitions)
+        c = self.c
+        backward = self.get_backward(y, prior_params, prior_transitions, c)
         T = len(y)
         path = []
         n_states = prior_transitions.shape[0]
@@ -63,7 +96,7 @@ class bayesian_hmm:
             path.append(xt)
         return path
     
-    def update_prior_gaussian(self, prior, y, n_iter):
+    def update_prior_gaussian(self, prior, y, n_iter, state):
         #gibbs sampling
         mu_prior, n0_prior, alpha, beta = prior[0], prior[1], prior[2], prior[3]
         y_bar = np.mean(y)
@@ -76,8 +109,15 @@ class bayesian_hmm:
             mu_step = np.random.normal((n/(n + n0_prior)) * y_bar + (n0_prior/(n + n0_prior)) * mu_prior, np.sqrt((n+n0_prior)/sigma_step))
             mu_posteriors.append(mu_step)
             sigma_posteriors.append(sigma_step)
-        estimator_mu = np.mean(mu_posteriors)
-        estimator_sigma = np.mean(sigma_posteriors)
+        
+        #me, se = dict(), dict()
+        #me[state]['mu'] = mu_posteriors
+        #se[state]['sigma'] = sigma_posteriors
+        #self.cache_estimator.update(me)
+        #self.cache_estimator.update(se)
+        burn = min(1000, int(0.1 * n_iter))
+        estimator_mu = np.mean(mu_posteriors[burn:])
+        estimator_sigma = np.mean(sigma_posteriors[burn:])
         return estimator_mu, np.sqrt(1/estimator_sigma)
     
     def fit_one_obs(self, y, labels, prior_params, prior_transitions, n_iter_gibbs):
@@ -87,7 +127,7 @@ class bayesian_hmm:
         params_hat = {}
         for s in states:
             y_s = y[np.where(np.array(labels) == s)]
-            params_hat[s] = self.update_prior_gaussian(prior_params[s], y_s, n_iter_gibbs)
+            params_hat[s] = self.update_prior_gaussian(prior_params[s], y_s, n_iter_gibbs, s)
             
         #Dealing with the case where labels does not contains all possible states 
         # i.e. one state is never visited
@@ -98,6 +138,8 @@ class bayesian_hmm:
         return P_hat, params_hat
     
     def fit(self, Y):
+        
+            
         prior_transition = self.prior_transitions
         prior_params = self.prior_params
         n_iter_gibbs = self.n_iter_gibbs
@@ -164,4 +206,18 @@ class bayesian_hmm:
         B = self.emission_proba_viterbi(new_series, self.posterior_P, self.posterior_params)
         _, probas = self.viterbi(new_series, self.posterior_P, B)
         return probas[-1]
-     
+    
+    
+    def monitor_convergence(self, state): 
+        plt.figure(figsize=(7,7))
+        plt.plot(self.cache_estimator[state]['mu'], label='mu')
+        plt.title("Convergence of mean for state :"+str(state))
+        plt.xlabel("Gibbs iterations")
+        plt.legend()
+        plt.show()
+        plt.figure(figsize=(7,7))
+        plt.plot(self.cache_estimator[state]['sigma'], label='sigma')
+        plt.title("Convergence of variance for state :"+str(state))
+        plt.xlabel("Gibbs iterations")
+        plt.legend()
+        plt.show()
