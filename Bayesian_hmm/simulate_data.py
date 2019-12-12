@@ -36,13 +36,13 @@ def generate_series(hidden_seq, params):
     return y
 
 
-def generate_samples(n_sample, lengths_range, P, params, init_state=None):
+def generate_samples(n_sample, lengths_range, P, params, noise=0., init_state=None):
     Y = []
     for sample in range(n_sample):
         n_states = P.shape[0]
         T = np.random.randint(lengths_range[0], lengths_range[1])
         hidden_seq = generate_markov_seq(n_states, P, T, init_state) #hidden states sequence 
         y = generate_series(hidden_seq, params) #time series following HMM model with hidden states and params
-        y = np.array(y) + np.random.random(len(y)) * 0.3 #adding noise to series
+        y = np.array(y) + np.random.random(len(y)) * noise #adding noise to series
         Y.append(y)
     return Y
