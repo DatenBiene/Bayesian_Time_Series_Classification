@@ -26,30 +26,38 @@ class bayesian_hmm:
             prev = hidden_seq_obs[h-1]
             posterior[prev, current] += 1
         return posterior
-
+    
+    def simulate_transition(self, dirich):
+        """ """
+        n_states = dirich.shape[0]
+        mat = np.zeros((n_states, n_states))
+        for k in range(n_states):
+            mat[k, :] = np.random.dirichlet(dirich[k, :])
+        return mat
+    
     def dirichlet_expectation(self, mat):
         row_sums = mat.sum(axis=1)
         return mat / row_sums[:, np.newaxis]
     
-    def get_forward(self, y, prior_params, prior_transitions, initial_distribution=None):
+    def get_forward(self, y, prior_params, transition_matrix, initial_distribution=None):
         """ Only to get the normalizing constant for the backward step """
         c = []
-        n_states = prior_transitions.shape[0]
+        n_states = transition_matrix.shape[0]
         T = len(y)
         alpha = np.zeros((T, n_states))
-        o = self.emission_proba_viterbi(y, prior_transitions, prior_params)
+        o = self.emission_proba_viterbi(y, transition_matrix, prior_params)
         
         if initial_distribution is None:
             initial_distribution = np.array([1./n_states] * n_states)
         alpha[0, :] = initial_distribution * o[:, 0]
-        c0 = np.sum(alpha[0, :])
+        c0 = np.sum(alpha[0, :]) + 1e-6
         alpha[0, :] = alpha[0, :] / c0
         c.append(c0)
        
         for t in range(1, T):
             for j in range(n_states):
-                alpha[t, j] = alpha[t - 1].dot(prior_transitions[:, j]) * o[j, t]
-            ct = np.sum(alpha[t, :])
+                alpha[t, j] = alpha[t - 1].dot(transition_matrix[:, j]) * o[j, t]
+            ct = np.sum(alpha[t, :]) + 1e-6
             alpha[t, :] = alpha[t, :] / ct
             c.append(ct)
         
@@ -59,104 +67,105 @@ class bayesian_hmm:
     
 
 
-    def get_backward(self, y, prior_params, prior_transitions, c):
+    def get_backward(self, y, prior_params, transition_matrix, c):
         """ comments """
-        n_states = prior_transitions.shape[0]
+        n_states = transition_matrix.shape[0]
         T = len(y)
         backward = np.zeros((T, n_states))
-        o = self.emission_proba_viterbi(y, prior_transitions, prior_params)
+        o = self.emission_proba_viterbi(y, transition_matrix, prior_params)
         # setting beta(T) = 1
         backward[T - 1] = np.ones((n_states)) /c[0]
         # Loop in backward way from T-1 to
         for t in range(T - 2, -1, -1):
             for j in range(n_states):
-                backward[t, j] = (backward[t + 1] * o[:, t + 1]).dot(prior_transitions[j, :])
+                backward[t, j] = (backward[t + 1] * o[:, t + 1]).dot(transition_matrix[j, :])
             ##### ---- experimental ------###### 
             #scaling to avoid underflow
             backward[t, :] = backward[t, :] / c[t]
         return backward
     
-    def simulate_path(self, y, prior_params, prior_transitions):
+    def simulate_path(self, y, prior_params, transition_matrix):
         """ comments """
-        self.get_forward(y, prior_params, prior_transitions)
+        self.get_forward(y, prior_params, transition_matrix)
         c = self.c
-        backward = self.get_backward(y, prior_params, prior_transitions, c)
+        backward = self.get_backward(y, prior_params, transition_matrix, c)
         T = len(y)
         path = []
-        n_states = prior_transitions.shape[0]
+        n_states = transition_matrix.shape[0]
         states = [s for s in range(n_states)]
-        probas = [1./n_states * self.normal_pdf(y[0], prior_params[s][0], prior_params[s][1]) * backward[0, s] for s in states]
+        probas = [(1./n_states) * self.normal_pdf(y[0], prior_params[s][0], prior_params[s][1]) * backward[0, s] for s in states]
+        #pas sur 
+        probas = [min(1e5, v) for v in probas]
+        probas = [max(1e-7, v) for v in probas]
+
         normalized_probas = np.array(probas) / np.sum(probas)
         x1 = np.random.choice(states, p=normalized_probas)
         path.append(x1)
         for t in range(1, T):
-            probas = [prior_transitions[path[t-1], s] * self.normal_pdf(y[t], prior_params[s][0], prior_params[s][1]) * backward[t, s] for s in states]
+            probas = [transition_matrix[path[t-1], s] * self.normal_pdf(y[t], prior_params[s][0], prior_params[s][1]) * backward[t, s] for s in states]
+            probas = [max(1e-7, v) for v in probas]
+            probas = [min(1e5, v) for v in probas]
             normalized_probas = np.array(probas) / np.sum(probas)
             xt = np.random.choice(states, p=normalized_probas)
             path.append(xt)
         return path
     
-    def update_prior_gaussian(self, prior, y, n_iter, state):
-        #gibbs sampling
-        mu_prior, n0_prior, alpha, beta = prior[0], prior[1], prior[2], prior[3]
-        y_bar = np.mean(y)
-        ssy = np.sum(np.square(np.array(y) - y_bar))
-        n = len(y)
-        mu_posteriors = [mu_prior]
-        sigma_posteriors = []
-        for k in range(n_iter):
-            sigma_step = np.random.gamma(alpha + n/2, 1/(beta + 0.5*ssy + (n*n0_prior/(2*(n+n0_prior))) * (y_bar - mu_prior)**2))
-            mu_step = np.random.normal((n/(n + n0_prior)) * y_bar + (n0_prior/(n + n0_prior)) * mu_prior, np.sqrt((n+n0_prior)/sigma_step))
-            mu_posteriors.append(mu_step)
-            sigma_posteriors.append(sigma_step)
-        
-        #me, se = dict(), dict()
-        #me[state]['mu'] = mu_posteriors
-        #se[state]['sigma'] = sigma_posteriors
-        #self.cache_estimator.update(me)
-        #self.cache_estimator.update(se)
-        burn = min(1000, int(0.1 * n_iter))
-        estimator_mu = np.mean(mu_posteriors[burn:])
-        estimator_sigma = np.mean(sigma_posteriors[burn:])
-        return estimator_mu, np.sqrt(1/estimator_sigma)
+
     
-    def fit_one_obs(self, y, labels, prior_params, prior_transitions, n_iter_gibbs):
-        a = self.update_prior_dirichlet(prior_transitions, labels)
-        P_hat = self.dirichlet_expectation(a)
-        states = set(labels)
-        params_hat = {}
-        for s in states:
-            y_s = y[np.where(np.array(labels) == s)]
-            params_hat[s] = self.update_prior_gaussian(prior_params[s], y_s, n_iter_gibbs, s)
-            
-        #Dealing with the case where labels does not contains all possible states 
-        # i.e. one state is never visited
-        never_visited = set(np.arange(P_hat.shape[0])) - set(params_hat.keys())
-        for s in never_visited:
-            #putting mean to 0 and variance to 1. Arbitrary could find something smarter
-            params_hat[s] = 0, 1
-        return P_hat, params_hat
+
     
     def fit(self, Y):
-        
-            
+        """ comments """
         prior_transition = self.prior_transitions
         prior_params = self.prior_params
         n_iter_gibbs = self.n_iter_gibbs
-        for obs in Y:
-            #y_obs, hidden_seq_obs = obs[0], obs[1]
-            y_obs = obs
-            hidden_seq_sim = self.simulate_path(y_obs, prior_params, prior_transition)
-            fit = self.fit_one_obs(y_obs, hidden_seq_sim, prior_params, prior_transition, n_iter_gibbs)
-            for s in prior_params:
-                try:
-                    prior_params[s][0], prior_params[s][1] = fit[1][s][0], fit[1][s][1]
-                except:
-                    print("error")
-                    return prior_params, fit[1]
-            prior_transition = fit[0]
-        self.posterior_P, self.posterior_params = prior_transition, prior_params
+        n = len(Y)
+        mu_prior, n0_prior, alpha, beta = prior_params[0][0], prior_params[0][1], prior_params[0][2], prior_params[0][3]
+        mu_posteriors = {}
+        sigma_posteriors = {}
+        states = np.arange(prior_transition.shape[0])
+        for s in states:
+            mu_posteriors[s] = []
+            sigma_posteriors[s] = []
+        params_step = prior_params.copy() 
+        transition_matrix = self.simulate_transition(prior_transition)
+        estimator_params = prior_params.copy()
+        for k in range(n_iter_gibbs):
+            hidden_seq_sim = self.simulate_path(Y, params_step, transition_matrix)
+            prior_transition = self.update_prior_dirichlet(prior_transition, hidden_seq_sim)
+            transition_matrix = self.simulate_transition(prior_transition)
+            for s in states:
+                
+                y_s = Y[np.where(np.array(hidden_seq_sim) == s)]
+                n_s = len(y_s)
+                if n_s == 0:
+                    continue
+                y_bar = np.mean(y_s)
+                ssy = np.sum(np.square(np.array(y_s) - y_bar))
+                sigma_step = np.random.gamma(alpha + n_s/2, 1/(beta + 0.5*ssy + (n_s*n0_prior/(2*(n_s+n0_prior))) * (y_bar - mu_prior)**2))
+                mu_step = np.random.normal((n_s/(n_s + n0_prior)) * y_bar + (n0_prior/(n_s + n0_prior)) * mu_prior, np.sqrt((n_s+n0_prior)/sigma_step))
+                mu_posteriors[s].append(mu_step)
+                sigma_posteriors[s].append(sigma_step)
+                params_step[s][0], params_step[s][1] = mu_step, sigma_step  
+                
+            never_visited = set(np.arange(prior_transition.shape[0])) - set(params_step.keys())
+            for s in never_visited:
+                #putting mean to 0 and variance to 1. Arbitrary could find something smarter
+                params_step[s][0], params_step[s][1] = 0, 1
+        
+        self.cache_mu_posteriors = mu_posteriors
+        self.cache_sigma_posteriors = sigma_posteriors
+        
+        burn = min(1000, int(0.1 * n_iter_gibbs))
+        for s in states:
+            estimator_mu = np.mean(mu_posteriors[s][burn:])
+            estimator_sigma = np.mean(sigma_posteriors[s][burn:])
+            estimator_params[s][0], estimator_params[s][1] = estimator_mu, estimator_sigma 
+            
+        estimator_P = self.dirichlet_expectation(prior_transition)
+        self.posterior_P, self.posterior_params = estimator_P, estimator_params
         print("Model fitted")
+
     
     def emission_proba_viterbi(self, y, P_hat, params_hat):
         n_states = P_hat.shape[0]
