@@ -1,7 +1,6 @@
-""" Bayesian KNN time series classification built on sktime and sklearn KNeighborsClassifier
-
+"""
+    Bayesian KNN time series classification built on sktime and sklearn KNeighborsClassifier
     Adapted from KNeighborsTimeSeriesClassifier from sktime (author: Jason Lines)
-    Author ;
 """
 
 __author__ = "Pierre Delanoue"
@@ -11,34 +10,19 @@ from scipy import stats
 from sklearn.utils.extmath import weighted_mode
 from sklearn.neighbors.classification import KNeighborsClassifier
 from functools import partial
-from distutils.version import LooseVersion
 import warnings
 import numpy as np
-from scipy.sparse import issparse
 from sklearn.metrics import pairwise_distances_chunked
-from sklearn.model_selection import GridSearchCV, LeaveOneOut
-from sklearn.utils import gen_even_slices
 from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.validation import check_is_fitted
-from sklearn.utils import Parallel, delayed, effective_n_jobs
-from sklearn.utils._joblib import __version__ as joblib_version
+from sklearn.utils import effective_n_jobs
 from sklearn.exceptions import DataConversionWarning
 from sktime.distances.elastic_cython import dtw_distance, wdtw_distance, ddtw_distance, wddtw_distance, lcss_distance, erp_distance, msm_distance, twe_distance
 from sktime.distances.mpdist import mpdist
 from sklearn.utils.validation import check_array
 from sklearn.neighbors.base import _check_weights, _get_weights
 import pandas as pd
-
-"""
-Please note that many aspects of this class are taken from scikit-learn's KNeighborsTimeSeriesClassifier
-class with necessary changes to enable use with time series classification data and distance measures.
-TO-DO: add a utility method to set keyword args for distance measure parameters (e.g. handle the parameter
-name(s) that are passed as metric_params automatically, depending on what distance measure is used in the
-classifier (e.g. know that it is w for dtw, c for msm, etc.). Also allow long-format specification for
-non-standard/user-defined measures
-e.g. set_distance_params(measure_type=None, param_values_to_set=None, param_names=None)
-"""
-
+from numba import jit
 
 class BayesianNeighborsTimeSeriesClassifier(KNeighborsClassifier):
     """
@@ -63,7 +47,7 @@ class BayesianNeighborsTimeSeriesClassifier(KNeighborsClassifier):
     metric          : distance measure for time series: {'dtw','ddtw','wdtw','lcss','erp','msm','twe'}: default ='dtw'
     metric_params   : dictionary for metric parameters: default = None
     """
-    def __init__(self, n_neighbors_bayes=100, weights='uniform', algorithm='brute', metric='dtw', metric_params=None, **kwargs):
+    def __init__(self, n_neighbors_bayes=100, p_gamma=1/20, weights='uniform', algorithm='brute', metric='dtw', metric_params=None, **kwargs):
 
         self._cv_for_params = False
 
@@ -99,6 +83,7 @@ class BayesianNeighborsTimeSeriesClassifier(KNeighborsClassifier):
             metric_params=metric_params,
             **kwargs)
         self.weights = _check_weights(weights)
+        self.p_gamma = p_gamma
 
     def fit(self, X, y):
         """Fit the model using X as training data and y as target values
@@ -139,6 +124,7 @@ class BayesianNeighborsTimeSeriesClassifier(KNeighborsClassifier):
         check_array.__code__ = _check_array_ts.__code__
         fx = self._fit(X)
         check_array.__code__ = temp
+        self.n_neighbors = min(len(y), self.n_neighbors)
         return fx
 
     def kneighbors(self, X, n_neighbors=None, return_distance=True):
@@ -336,28 +322,26 @@ class BayesianNeighborsTimeSeriesClassifier(KNeighborsClassifier):
         ordered = self.kneighbors(X, n_neighbors=n_neighbors_bayes, return_distance=False)
 
         y_train = self.y_train
-        q_posteriori = get_bayesian_k_posteriori(np.flip(y_train[ordered[0]]))
-        #k_bayes = int(np.sum(np.array(range(len(q_posteriori)))*q_posteriori))
-        k_bayes = np.max([np.argmax(q_posteriori), 1])
+
+        classes, y_pos = np.unique(np.flip(y_train[ordered[0]]), return_inverse=True)
+        q_posteriori = get_bayesian_k_posteriori(classes, y_pos, p_gamma=self.p_gamma)
+        k_bayes = int(np.sum(np.array(range(len(q_posteriori)))*q_posteriori))
         y_pred = self.predict_singel_k(X[[0]], k_bayes)
 
         l_k = [k_bayes]
         for i in range(X.shape[0]-1):
             idx = i+1
-
-            q_posteriori = get_bayesian_k_posteriori(np.flip(y_train[ordered[idx]]))
-            #k_bayes = int(np.sum(np.array(range(len(q_posteriori)))*q_posteriori))
-            k_bayes = np.max([np.argmax(q_posteriori), 1])
+            classes, y_pos = np.unique(np.flip(y_train[ordered[idx]]), return_inverse=True)
+            q_posteriori = get_bayesian_k_posteriori(classes, y_pos)
+            k_bayes = int(np.sum(np.array(range(len(q_posteriori)))*q_posteriori))
+            # k_bayes = np.max([np.argmax(q_posteriori), 1])
 
             pred = self.predict_singel_k(X[[idx]], k_bayes)
 
             y_pred = np.concatenate([y_pred, pred])
-            l_k +=[k_bayes]
-        #return y_pred
-        #return l_k
-        return y_pred, l_k
+            l_k += [k_bayes]
+        return y_pred
 
-    # def predict_proba(self, X) not supported
 
 def check_data_sktime_tsc(X):
     """ A utility method to check the input of a TSC KNN classifier. The data must either be in
@@ -392,13 +376,14 @@ def check_data_sktime_tsc(X):
 
 
 def _check_array_ts(array, accept_sparse=False, accept_large_sparse=True,
-                    dtype="numeric", order=None, copy=False, force_all_finite=True,
-                    ensure_2d=True, allow_nd=True, ensure_min_samples=1,
-                    ensure_min_features=1, warn_on_dtype=False, estimator=None):
+                    dtype="numeric", order=None, copy=False,
+                    force_all_finite=True, ensure_2d=True, allow_nd=True,
+                    ensure_min_samples=1, ensure_min_features=1,
+                    warn_on_dtype=False, estimator=None):
     return array
 
-def get_bayesian_k_posteriori(y_ordered, eta_prior = None, p_gamma = 1/20):
-    classes, y_pos = np.unique(y_ordered, return_inverse=True)
+@jit(nopython=True)
+def get_bayesian_k_posteriori(classes, y_pos, eta_prior=None, p_gamma=1/5):
     tau = len(y_pos)
     pi = np.zeros(tau)
 
@@ -406,23 +391,19 @@ def get_bayesian_k_posteriori(y_ordered, eta_prior = None, p_gamma = 1/20):
     growth_prop_2 = np.zeros(tau + 1)
     nb_classes = len(classes)
 
-    p_gamma = p_gamma
-
-    if eta_prior is None :
+    if eta_prior is None:
         eta = np.array([10]*nb_classes)
-    else :
+    else:
         eta = eta_prior
 
     s_alpha_prior = np.sum(eta)
-
 
     for t in range(tau):
         y_t = y_pos[t] # will also be the indice of the corresponding alpha in eta
 
         for i in range(t+1):
-            k_tempo = i
-            pi[i] = (eta[y_t] + np.sum((y_pos[:i] == 0)*1))/(s_alpha_prior +i) # pas sur des bornes
 
+            pi[i] = (eta[y_t] + np.sum((y_pos[:i] == y_t)*1))/(s_alpha_prior +i)
             growth_prop_2[i + 1] = growth_prop_1[i]*pi[i]*(1-p_gamma)
 
         pi[0] = eta[y_t]/s_alpha_prior
