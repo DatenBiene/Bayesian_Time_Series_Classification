@@ -4,7 +4,6 @@
 """
 
 __author__ = "Pierre Delanoue"
-__all__ = ["BayesianKNeighborsTimeSeriesClassifier"]
 
 from scipy import stats
 from sklearn.utils.extmath import weighted_mode
@@ -24,28 +23,20 @@ from sklearn.neighbors.base import _check_weights, _get_weights
 import pandas as pd
 from numba import jit
 
+
 class BayesianNeighborsTimeSeriesClassifier(KNeighborsClassifier):
     """
-    An adapted version of the scikit-learn KNeighborsClassifier to work with time series data.
-    Necessary changes required for time series data:
-        -   calls to X.shape in kneighbors, predict and predict_proba.
-            In the base class, these methods contain:
-                n_samples, _ = X.shape
-            This however assumes that data must be 2d (a set of multivariate time series is 3d). Therefore these methods
-            needed to be overridden to change this call to the following to support 3d data:
-                n_samples = X.shape[0]
-        -   check array has been disabled. This method allows nd data via an argument in the method header. However, there
-            seems to be no way to set this in the classifier and allow it to propagate down to the method. Therefore, this
-            method has been temporarily disabled (and then re-enabled). It is unclear how to fix this issue without either
-            writing a new classifier from scratch or changing the scikit-learn implementation. TO-DO: find permanent
-            resolution to this issue (raise as an issue on sklearn GitHub?)
+    An adapted version of the sktime KNeighborsTimeSeriesClassifier.
+    The Bayesian approach automatically selects a number of neighbours k for each observation.
+    
     Parameters
     ----------
-    n_neighbors     : int, set k for knn (default =1)
-    weights         : mechanism for weighting a vote: 'uniform', 'distance' or a callable function: default ==' uniform'
-    algorithm       : search method for neighbours {‘auto’, ‘ball_tree’, ‘kd_tree’, ‘brute’}: default = 'brute'
-    metric          : distance measure for time series: {'dtw','ddtw','wdtw','lcss','erp','msm','twe'}: default ='dtw'
-    metric_params   : dictionary for metric parameters: default = None
+    n_neighbors_bayes   : int, number of neighbors to consider
+    p_gamma             : a priori parameter of the geometric law for k
+    weights             : mechanism for weighting a vote: 'uniform', 'distance' or a callable function: default ==' uniform'
+    algorithm           : search method for neighbours {‘auto’, ‘ball_tree’, ‘kd_tree’, ‘brute’}: default = 'brute'
+    metric              : distance measure for time series: {'dtw','ddtw','wdtw','lcss','erp','msm','twe'}: default ='dtw'
+    metric_params       : dictionary for metric parameters: default = None
     """
     def __init__(self, n_neighbors_bayes=100, p_gamma=1/20, weights='uniform', algorithm='brute', metric='dtw', metric_params=None, **kwargs):
 
@@ -69,8 +60,7 @@ class BayesianNeighborsTimeSeriesClassifier(KNeighborsClassifier):
             metric = twe_distance
         elif metric == 'mpdist':
             metric = mpdist
-        # When mpdist is used, the subsequence length (parameter m) must be set
-        # Example: knn_mpdist = KNeighborsTimeSeriesClassifier(metric='mpdist', metric_params={'m':30})
+
         else:
             if type(metric) is str:
                 raise ValueError("Unrecognised distance measure: "+metric+". Allowed values are names from [dtw,ddtw,wdtw,wddtw,lcss,erp,msm] or "
@@ -264,12 +254,13 @@ class BayesianNeighborsTimeSeriesClassifier(KNeighborsClassifier):
 
     def predict_singel_k(self, X, n_neighbors=None):
 
-        """Predict the class labels for the provided data
+        """Predict the class labels for the provided data for the selected number of neighbors.
         Parameters
         ----------
         X : sktime-format pandas dataframe or array-like, shape (n_query, n_features), \
                 or (n_query, n_indexed) if metric == 'precomputed'
             Test samples.
+        n_neighbors : int, number of neighbor
         Returns
         -------
         y : array of shape [n_samples] or [n_samples, n_outputs]
@@ -313,25 +304,33 @@ class BayesianNeighborsTimeSeriesClassifier(KNeighborsClassifier):
 
     def predict(self, X):
         X = check_data_sktime_tsc(X)
-        temp = check_array.__code__
         check_array.__code__ = _check_array_ts.__code__
         X = check_array(X)
 
         n_neighbors_bayes = self.n_neighbors
 
-        ordered = self.kneighbors(X, n_neighbors=n_neighbors_bayes, return_distance=False)
+        ordered = self.kneighbors(
+                                    X,
+                                    n_neighbors=n_neighbors_bayes,
+                                    return_distance=False
+                                    )
 
         y_train = self.y_train
 
-        classes, y_pos = np.unique(np.flip(y_train[ordered[0]]), return_inverse=True)
-        q_posteriori = get_bayesian_k_posteriori(classes, y_pos, p_gamma=self.p_gamma)
+        classes, y_pos = np.unique(
+                                    np.flip(y_train[ordered[0]]),
+                                    return_inverse=True
+                                    )
+        q_posteriori = get_bayesian_k_posteriori(classes, y_pos,
+                                                 p_gamma=self.p_gamma)
         k_bayes = int(np.sum(np.array(range(len(q_posteriori)))*q_posteriori))
         y_pred = self.predict_singel_k(X[[0]], k_bayes)
 
         l_k = [k_bayes]
         for i in range(X.shape[0]-1):
             idx = i+1
-            classes, y_pos = np.unique(np.flip(y_train[ordered[idx]]), return_inverse=True)
+            classes, y_pos = np.unique(np.flip(y_train[ordered[idx]]),
+                                       return_inverse=True)
             q_posteriori = get_bayesian_k_posteriori(classes, y_pos)
             k_bayes = int(np.sum(np.array(range(len(q_posteriori)))*q_posteriori))
             # k_bayes = np.max([np.argmax(q_posteriori), 1])
@@ -382,6 +381,7 @@ def _check_array_ts(array, accept_sparse=False, accept_large_sparse=True,
                     warn_on_dtype=False, estimator=None):
     return array
 
+
 @jit(nopython=True)
 def get_bayesian_k_posteriori(classes, y_pos, eta_prior=None, p_gamma=1/5):
     tau = len(y_pos)
@@ -399,7 +399,8 @@ def get_bayesian_k_posteriori(classes, y_pos, eta_prior=None, p_gamma=1/5):
     s_alpha_prior = np.sum(eta)
 
     for t in range(tau):
-        y_t = y_pos[t] # will also be the indice of the corresponding alpha in eta
+        y_t = y_pos[t]
+        # will also be the indice of the corresponding alpha in eta
 
         for i in range(t+1):
 
