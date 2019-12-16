@@ -26,7 +26,7 @@ def build_hmm_models(X_data, n_model, n_states, hmm_obj, n_iter_gibbs=2000, max_
     if max_obs is None:
         max_obs = 900
     models = []
-    for classe in range(1, n_model + 1):
+    for classe in X_data:
         print("------")
         print("Fitting Class", classe, "...")
         #sns.distplot(np.concatenate(X_data[classe])[:max_obs], hist=False)
