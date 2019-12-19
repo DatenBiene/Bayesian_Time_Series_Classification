@@ -22,7 +22,7 @@ def assign_classes(series, models, verbose=False):
 
 def build_hmm_models(X_data, n_model, n_states, hmm_obj, n_iter_gibbs=2000, max_obs = None):
     print("Building", n_model, " Bayesian HMM instances with", n_states, "hidden states ...")
-    #create priors 
+    #create priors
     if max_obs is None:
         max_obs = 900
     models = []
@@ -38,3 +38,18 @@ def build_hmm_models(X_data, n_model, n_states, hmm_obj, n_iter_gibbs=2000, max_
         model_class_step.fit(np.concatenate(X_data[classe])[:max_obs])
         models.append(model_class_step)
     return models
+
+
+def train_ts_to_dic(X_train, y_train):
+    X_train_dic = {i: [] for i in set(y_train)}
+    for j in range(X_train.shape[0]):
+        y = y_train[j]
+        X_train_dic[y] += [np.array(X_train.iloc[j][0])]
+    return X_train_dic
+
+
+def test_ts_to_list(X_test):
+    X_test_dic = []
+    for j in range(X_test.shape[0]):
+        X_test_dic += [np.array(X_test.iloc[j][0])]
+    return X_test_dic

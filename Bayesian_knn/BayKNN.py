@@ -28,7 +28,7 @@ class BayesianNeighborsTimeSeriesClassifier(KNeighborsClassifier):
     """
     An adapted version of the sktime KNeighborsTimeSeriesClassifier.
     The Bayesian approach automatically selects a number of neighbours k for each observation.
-    
+
     Parameters
     ----------
     n_neighbors_bayes   : int, number of neighbors to consider
