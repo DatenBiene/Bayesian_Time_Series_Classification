@@ -3,7 +3,7 @@ Bayesian Statistics Project : ENSAE Engineering degree 3rd Year
 
 Authors: Mehdi Bennaceur & Pierre Delanoue
 
-This repository contains two Bayesian methods for classifying univariate time series: a Bayesian K Nearest Neighborhood (BayKNN) and a Bayesian Hidden Mrkov Model (HMM).
+This repository contains two Bayesian methods for classifying univariate time series: a Bayesian K Nearest Neighborhood (BayKNN) and a Bayesian Hidden Markov Model (HMM).
 
 Please Read the paper Bayseian_Time_Series_Classification.pdf explaining the implementation.
 
